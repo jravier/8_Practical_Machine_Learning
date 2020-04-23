@@ -1,0 +1,126 @@
+---
+title: "Practical Machine Learning"
+author: "jravier"
+date: "22/04/2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(readr)
+library(dplyr)
+```
+
+# Overview  
+
+# Exploratory data analysis and strategy  
+
+## Basic data cleaning  
+Loading the training data set somewhere (in R, in a text editor or in Excel), we see plenty of rows, plenty of columns, plenty of NAs, one date variable and some factors variables, so let's load the data properly:  
+
+```{r load}
+pml_training <- read_csv("pml-training.csv", na=c("NA","#DIV/0!"), col_types = cols(
+    X1 = col_skip(), 
+    user_name = col_factor(levels = c("adelmo", "carlitos", "charles", "eurico", "jeremy", "pedro")), 
+    cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M"), 
+    new_window = col_factor(levels = c("yes", "no")), 
+    num_window = col_integer(),
+    classe = col_factor(levels = c("A", "B", "C", "D", "E"))))
+
+pml_testing <- read_csv("pml-testing.csv", na=c("NA","#DIV/0!"), col_types = cols(
+    X1 = col_skip(), 
+    user_name = col_factor(levels = c("adelmo", "carlitos", "charles", "eurico", "jeremy", "pedro")), 
+    cvtd_timestamp = col_datetime(format = "%d/%m/%Y %H:%M"), 
+    new_window = col_factor(levels = c("yes", "no")), 
+    num_window = col_integer()))
+```
+
+## Parcimonious strategy
+Given what is said in the course project instructions and the experiment description page at http://groupware.les.inf.puc-rio.br/har, we infer that:
+
+* The last column is the outcome.
+* All the columns with belt, forearm, arm, and dumbell in their names are measurements.
+* The first columns (up to 'num_window') are meta data about the measurements.
+
+The course project instructions states that "You may use any of the other variables to predict with". So, can we use the meta data to predict the outcome ?
+
+* The observations are organized in time series (time stamps are increasing).
+* The observations are organized into windows (as explained in the article at http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf, linked from the experiment description page):
+    * The article explain that each window correspond to a single subject (user), and most importantly to A SINGLE OUTCOME.
+    * We see that windows are numbered and that we have window numbers both in the training and the testing data sets.
+    * But, our test (20 observations) and training (~19 000 obs) sets are just subsets of the original data (~39 000 obs).
+
+Let's confirm the first point:
+```{r win check}
+winCheck<-pml_training %>%
+    group_by(num_window) %>%
+    summarise(num_classe=n_distinct(classe), num_user=n_distinct(user_name))
+
+summary(winCheck)
+```
+
+So this is the case: window numbers are not repeated among users and only ONE outcome is possible for each window number.  
+
+
+**Hence, if (and only if) all the window numbers in the test set are present in the training set, we can predict, with 100% accuracy and without any training, the outcome from the window number variable.**  
+
+## More data cleaning
+If we can't use our simple strategy, we'll have to resort to training some models on the measurements and predict the outcome from these models. In this case, can we reduce computing resources by removing some variables?
+
+* We see a lot of columns with mostly NAs. All the NA values are for observations with the variable 'new_window' set to 'no', while the non NA values are for 'yes'. This means that these variables contains only statistics about the whole windows, not about individual observations.
+* None of the 20 observations in the test set are new windows and they have all NA values in these statistics variables. Test set variables are either full of NA or have no NA at all:
+
+```{r chack NA}
+levels(as.factor(sapply(pml_testing, function(x) sum(is.na(x)))))
+```
+
+So we won't be able to predict anything with these variables full of NA and we can safely remove all these columns from both the training and testing sets:  
+
+```{r remove NA}
+useless<-sapply(pml_testing, function(x) sum(is.na(x)))==20
+pml_testing <- pml_testing[,useless==FALSE]
+pml_training<-pml_training[,useless==FALSE]
+```
+
+We can also check if some training variables have too little variation to be useful for training:  
+```{r little var}
+nearZeroVar(pml_training[,7:58])
+```
+
+This is not the case and we keep all the remaining columns.  
+
+# Easy answer: 100% accuracy prediction without training
+Using a left join (test set on the left), let's try to predict the outcome for each observation in the test set. If we have any Na coming from the right side (variables from training set), the window numbers are not fully matching and prediction can't be made for those unmatching window numbers:  
+```{r predict win num}
+winFit<-pml_training %>%
+    group_by(num_window, classe) %>%
+    summarise(lines=n())
+
+win.test.predict <- pml_testing %>%
+    select(num_window, problem_id) %>%
+    left_join(winFit, by="num_window")
+
+win.test.predict$classe
+```
+
+No NA... The prediction is full.  
+More importantly, it's done with 100% accuracy, without any model, no need for cross validation and 0% out of sample error.  
+This approach is the most **parcimonious** and, in a scientific state of mind, should be chosen any time it's possible!  
+All it needs is to _read the f*****g documentation"_ !
+
+Please note that even if the window numbers were missing or not matching, we could try try the same approach by using the user name and time stamps variables: since all observations are taken in time series and each time serie correspond to a single outcome, it's possible to match the values in the test set to values in the training set.  
+
+Okay, but this is a course about machine learning and I'm suppose to show how I can train models, evaluate them and predict outcome from them...  
+
+# More complicated answer: Tree prediction with all variables  
+Remember that we "may use any of the other variables to predict with".  Given this and what we discovered about the meta data, we presume that a Tree Model using these meta data might lead to quite good result as well.  
+
+
+
+# More realistic answer: prediction with only the physical measurements  
+Yes, this approach is more realistic as in real time prediction in sucha device we won't have the meta data, but please note that this is not what would be used in real world: the authors of the experiment explain in their article (http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf) that individual observation are too noisy and only the statistic variables on full windows should be used for prediction.  
+However, as the test set observations don't have any value for these statistics, we'll have to make prediction directly from the sensors outputs (or combinations of them).  
+
+The authors of the study state that "because  of  the  characteristic  noise  in  the  sensor  data,  we used  a  Random  Forest  approach" and cite this reference to justify it: L. B. Statistics and L. Breiman. Random forests. InMachine Learning, pages 5–32, 2001.
+
+So we will also train a Random Forest Model.
